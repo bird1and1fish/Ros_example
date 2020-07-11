@@ -1,0 +1,67 @@
+#include <ros/ros.h>
+#include <signal.h>
+#include <geometry_msgs/Twist.h>
+#include <wiringPi.h>
+
+#define right_senser 5
+#define left_senser 4
+
+ros::Publisher cmdVelPub;
+
+void turn_left(geometry_msgs::Twist speed);
+
+void turn_right(geometry_msgs::Twist speed);
+
+void straight_go(geometry_msgs::Twist speed);
+
+int main(int argc, char** argv)
+{
+	wiringPiSetup();
+	ros::init(argc, argv, "car_track");
+	ros::NodeHandle node;
+	cmdVelPub = node.advertise<geometry_msgs::Twist>("cmd_vel", 1);
+	geometry_msgs::Twist speed;
+	pinMode(right_senser, INPUT);
+	pinMode(left_senser, INPUT);
+	int right_read, left_read;
+	while(ros::ok())
+	{
+		right_read = digitalRead(right_senser);
+		left_read = digitalRead(left_senser);
+		if(right_read == 1)//黑线在右边，右转
+		{
+			turn_right(speed);
+		}
+		else if(left_read ==1)//黑线在左边，左转
+		{
+			turn_left(speed);
+		}
+		else
+		{
+			straight_go(speed);
+		}
+		delay(50);
+	}
+	return 0;
+}
+
+void turn_left(geometry_msgs::Twist speed)
+{
+	speed.linear.x = -0.01;
+	speed.angular.z = -0.8;
+	cmdVelPub.publish(speed);
+}
+
+void turn_right(geometry_msgs::Twist speed)
+{
+	speed.linear.x = -0.01;
+	speed.angular.z = 0.8;
+	cmdVelPub.publish(speed);
+}
+
+void straight_go(geometry_msgs::Twist speed)
+{
+	speed.linear.x = -0.08;
+	speed.angular.z = 0;
+	cmdVelPub.publish(speed);
+}

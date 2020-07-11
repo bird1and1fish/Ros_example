@@ -1,0 +1,254 @@
+#include <ros/ros.h>
+#include <sensor_msgs/LaserScan.h>
+#include <geometry_msgs/Twist.h>
+#include <wiringPi.h>
+#include <math.h>
+
+#define pi 3.141592653589
+
+ros::Publisher cmdVelPub;
+geometry_msgs::Twist speed;
+int stop_time = 0;
+
+void run_forward();
+void run_stop();
+void turn_angle_left(float angle);
+void turn_angle_right(float angle);
+void my_callback(const sensor_msgs::LaserScan::ConstPtr& msg);
+
+int main(int argc, char** argv)
+{
+	wiringPiSetup();
+	ros::init(argc, argv, "find_bench");
+	ros::NodeHandle nh;
+	cmdVelPub = nh.advertise<geometry_msgs::Twist>("cmd_vel", 1);
+	
+	ros::Subscriber scan_sub = nh.subscribe("scan", 1, my_callback);
+	ros::spin();
+	return 0;
+}
+
+void run_forward()
+{
+	speed.linear.x = 0.05;
+	speed.angular.z = 0;
+	cmdVelPub.publish(speed);
+}
+
+void run_stop()
+{
+	speed.linear.x = 0;
+	speed.angular.z = 0;
+	cmdVelPub.publish(speed);
+}
+
+void turn_angle_left(float angle)
+{
+	float time = angle / 18.0;
+	speed.linear.x = 0;
+	speed.angular.z = 0.3;
+	cmdVelPub.publish(speed);
+	ros::Duration(time).sleep();
+	speed.angular.z = 0;
+	cmdVelPub.publish(speed);
+	ros::Duration(2).sleep();
+}
+
+void turn_angle_right(float angle)
+{
+	float time = angle / 18.0;
+	speed.linear.x = 0;
+	speed.angular.z = -0.3;
+	cmdVelPub.publish(speed);
+	ros::Duration(time).sleep();
+	speed.angular.z = 0;
+	cmdVelPub.publish(speed);
+	ros::Duration(2).sleep();
+}
+
+void my_callback(const sensor_msgs::LaserScan::ConstPtr& msg)
+{
+	int i;
+	float ranges[360];
+	for(i = 0; i < 360; i++)
+		ranges[i] = msg -> ranges[i];
+	for(i = 0; i < 360; i++)//预处理
+	{
+		int previous, next;
+		if(ranges[i] < 0.1)
+		{
+			previous = i - 1;
+			if(previous < 0)
+				previous = 359;
+			next = i + 1;
+			if(next > 359)
+				next = 0;
+			ranges[i] = (ranges[previous] + ranges[next]) / 2;
+		}
+	}
+	
+	int* classify = new int[360];//存放聚类的类别
+	int num = 1;//存放类的总数
+	int temp_num = 1;//存放每一个目标的长度
+	int* class_len = new int[360];//存放每一类数组的长度
+	float* object_len = new float[360];//存放每个物体的长度
+	int center_point_angle[360];//存储每个目标中间点的角度
+	float center_point_distance[360];//存储每个目标中间点的距离
+	float temp0;
+	float temp1 = ranges[0];
+	float temp_len;
+	classify[0] = 1;
+	
+	for(i = 1; i < 360; i++)//最近邻聚类并存储每一类的长度
+	{
+		temp0 = temp1;
+		temp1 = ranges[i]; 
+		temp_len = abs(temp1 - temp0);
+		if(temp_len > 0.1)
+		{
+			class_len[num - 1] = temp_num;
+			num++;
+			temp_num = 0;
+		}
+		temp_num = temp_num + 1;
+		classify[i] = num;
+	}
+	class_len[num - 1] = temp_num;//存储最后一个目标的长度
+	//将首尾的类别进行合并
+	if(abs(ranges[359] - ranges[0]) <= 0.1)//首尾合并的情况
+	{
+		int j;
+		for(j = 360 - class_len[num - 1]; j < 360; j++)
+			classify[j] = 1;
+			
+		//计算第1个目标的长度
+		float temp_angle = 0;
+		float start_side = 0;
+		float end_side = 0;
+		temp_angle = (float)(class_len[0] + class_len[num - 1] - 1) / 180.0 * pi;
+		start_side = ranges[360 - class_len[num - 1]];
+		end_side = ranges[class_len[0] - 1];
+		object_len[0] = sqrt(pow(start_side, 2) + pow(end_side, 2) - 2 * start_side * end_side * cos(temp_angle));
+		center_point_angle[0] = (class_len[0] - class_len[num - 1]) / 2;//中心点
+		if(center_point_angle[0] < 0)
+			center_point_angle[0] = 359 + center_point_angle[0];
+		center_point_distance[0] = ranges[center_point_angle[0]];
+		//ROS_INFO("The 0 angle is %f, start is %f, end is %f, len is %f", temp_angle, start_side, end_side, object_len[0]);
+		num = num - 1;
+		
+		//依次计算后续目标的长度
+		int len_all = 0;//存放前方所有目标的数组长度
+		for(j = 1; j < num; j++)//存放每个目标的长度和中心点
+		{
+			len_all = len_all + class_len[j - 1];
+			temp_angle = (float)(class_len[j] - 1) / 180.0 * pi;
+			start_side = ranges[len_all];
+			end_side = ranges[len_all + class_len[j] - 1];
+			object_len[j] = sqrt(pow(start_side, 2) + pow(end_side, 2) - 2 * start_side * end_side * cos(temp_angle));
+			center_point_angle[j] = (2 * len_all + class_len[j]) / 2;
+			center_point_distance[j] = ranges[center_point_angle[j]];
+		}
+		
+		class_len[0] = class_len[0] + class_len[num];
+		class_len[num] = 0;
+	}
+	else//首尾不用合并的情况
+	{
+		float temp_angle = 0;
+		float start_side = 0;
+		float end_side = 0;
+		int len_all = 0;
+		int j;
+		for(j = 0; j < num; j++)//存放每个目标的长度和中心点
+		{
+			temp_angle = (float)(class_len[j] - 1) / 180.0 * pi;
+			start_side = ranges[len_all];
+			end_side = ranges[len_all + class_len[j] - 1];
+			object_len[j] = sqrt(pow(start_side, 2) + pow(end_side, 2) - 2 * start_side * end_side * cos(temp_angle));
+			center_point_angle[j] = (2 * len_all + class_len[j]) / 2;
+			center_point_distance[j] = ranges[center_point_angle[j]];
+			len_all = len_all + class_len[j];
+		}
+	}
+	
+	//for(i = 0; i < num; i++)
+	//	ROS_INFO("The %d length is %f", i, object_len[i]);
+	if(object_len[0] >= 0.2 && object_len[0] <= 0.22)
+	{
+		stop_time = 0;
+		if(center_point_distance[0] <= 0.2)//不用行走的情况
+		{
+			if(ros::ok())
+				run_stop();
+		}
+		else//需要行走的情况
+		{
+			if(ros::ok())
+				run_forward();
+		}
+	}
+	else if(stop_time <= 2)
+		stop_time = stop_time + 1;
+	else
+	{
+		stop_time = 0;
+		for(i = 0; i < num; i++)
+		{
+			if(object_len[i] >= 0.2 && object_len[i] <= 0.22 && msg -> intensities[center_point_angle[i]] > 1000 && msg -> intensities[center_point_angle[i]] < 7000)//找到目标
+			{
+				if(center_point_angle[i] <= 10 || center_point_angle[i] >= 350)//不用旋转的情况
+				{
+					if(center_point_distance[i] <= 0.2)//不用行走的情况
+					{
+						if(ros::ok())
+							run_stop();
+					}
+					else//需要行走的情况
+					{
+						if(ros::ok())
+							run_forward();
+					}
+				}
+				else//需要旋转的情况
+				{
+					if(center_point_angle[i] <= 180)//左转
+					{
+						if(ros::ok())
+							turn_angle_left((float)center_point_angle[i]);
+					}
+					else
+					{
+						if(ros::ok())
+							turn_angle_right((float)(360 - center_point_angle[i]));
+					}
+				}
+				//ROS_INFO("the object is %d", i);
+				//ROS_INFO("The length is %f, the intensity is %f", object_len[center_point_angle[i]], msg -> intensities[center_point_angle[i]]);
+				break;
+			}
+		}
+	}
+	
+	//ROS_INFO("the center angle is %d, the center distance is %f", center_point_angle[0], center_point_distance[0]);
+	//ROS_INFO("The %d length is %f", 0, object_len[0]);
+	//ROS_INFO("The forward distance is %f", msg -> ranges[0]);
+	//ROS_INFO("The forward intensity is %f", msg -> intensities[0]);
+	//ROS_INFO("The num is %d", num);
+	//ROS_INFO("######################");
+	
+	
+	/*
+	float forward_distance = msg -> ranges[0];
+	int i = 0;
+	if(forward_distance != 0 && forward_distance < 0.3)
+	{
+		if(ros::ok())
+			run_forward();
+	}
+	else
+	{
+		if(ros::ok())
+			run_stop();
+	}
+	*/
+}
